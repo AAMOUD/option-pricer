@@ -1,0 +1,9 @@
+numpy 
+scipy 
+matplotlib 
+jupyter 
+notebook 
+pytest 
+black 
+mypy
+numba
