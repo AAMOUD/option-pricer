@@ -1,10 +1,250 @@
 import streamlit as st
-import requests
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
+from math import exp, log, sqrt, erf, pi
 
-API_URL = "http://localhost:8000"
+# Pricing functions
+def norm_pdf(x: float) -> float:
+    return (1.0 / sqrt(2.0 * pi)) * exp(-0.5 * x * x)
+
+def norm_cdf(x: float) -> float:
+    return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
+def black_scholes_price(spot: float, strike: float, rate: float, vol: float, 
+                       maturity: float, is_call: bool) -> float:
+    d1 = (log(spot / strike) + (rate + 0.5 * vol ** 2) * maturity) / (vol * sqrt(maturity))
+    d2 = d1 - vol * sqrt(maturity)
+    
+    if is_call:
+        price = spot * norm_cdf(d1) - strike * exp(-rate * maturity) * norm_cdf(d2)
+    else:
+        price = strike * exp(-rate * maturity) * norm_cdf(-d2) - spot * norm_cdf(-d1)
+    
+    return price
+
+def black_scholes_greeks(spot: float, strike: float, rate: float, vol: float,
+                        maturity: float, is_call: bool) -> dict:
+    d1 = (log(spot / strike) + (rate + 0.5 * vol ** 2) * maturity) / (vol * sqrt(maturity))
+    d2 = d1 - vol * sqrt(maturity)
+    
+    price = black_scholes_price(spot, strike, rate, vol, maturity, is_call)
+    
+    if is_call:
+        delta = norm_cdf(d1)
+    else:
+        delta = norm_cdf(d1) - 1
+    
+    gamma = norm_pdf(d1) / (spot * vol * sqrt(maturity))
+    
+    theta_common = -(spot * norm_pdf(d1) * vol) / (2 * sqrt(maturity))
+    if is_call:
+        theta = theta_common - rate * strike * exp(-rate * maturity) * norm_cdf(d2)
+    else:
+        theta = theta_common + rate * strike * exp(-rate * maturity) * norm_cdf(-d2)
+    theta = theta / 365
+    
+    vega = spot * norm_pdf(d1) * sqrt(maturity)
+    
+    if is_call:
+        rho = strike * maturity * exp(-rate * maturity) * norm_cdf(d2)
+    else:
+        rho = -strike * maturity * exp(-rate * maturity) * norm_cdf(-d2)
+    
+    return {
+        "price": price,
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "rho": rho
+    }
+
+def binomial_price(spot: float, strike: float, rate: float, vol: float,
+                  maturity: float, is_call: bool, is_american: bool, steps: int) -> float:
+    dt = maturity / steps
+    u = exp(vol * sqrt(dt))
+    d = 1 / u
+    p = (exp(rate * dt) - d) / (u - d)
+    discount = exp(-rate * dt)
+    
+    prices = np.zeros(steps + 1)
+    for i in range(steps + 1):
+        prices[i] = spot * (u ** (steps - i)) * (d ** i)
+    
+    if is_call:
+        values = np.maximum(prices - strike, 0)
+    else:
+        values = np.maximum(strike - prices, 0)
+    
+    for step in range(steps - 1, -1, -1):
+        for i in range(step + 1):
+            values[i] = discount * (p * values[i] + (1 - p) * values[i + 1])
+            
+            if is_american:
+                current_price = spot * (u ** (step - i)) * (d ** i)
+                if is_call:
+                    intrinsic = max(current_price - strike, 0)
+                else:
+                    intrinsic = max(strike - current_price, 0)
+                values[i] = max(values[i], intrinsic)
+    
+    return values[0]
+
+def binomial_greeks(spot: float, strike: float, rate: float, vol: float,
+                   maturity: float, is_call: bool, is_american: bool, steps: int) -> dict:
+    price = binomial_price(spot, strike, rate, vol, maturity, is_call, is_american, steps)
+    
+    h = spot * 0.01
+    price_up = binomial_price(spot + h, strike, rate, vol, maturity, is_call, is_american, steps)
+    price_down = binomial_price(spot - h, strike, rate, vol, maturity, is_call, is_american, steps)
+    delta = (price_up - price_down) / (2 * h)
+    
+    gamma = (price_up - 2 * price + price_down) / (h ** 2)
+    
+    h_vol = 0.01
+    price_vol_up = binomial_price(spot, strike, rate, vol + h_vol, maturity, is_call, is_american, steps)
+    vega = (price_vol_up - price) / h_vol
+    
+    h_time = 1 / 365
+    if maturity > h_time:
+        price_time = binomial_price(spot, strike, rate, vol, maturity - h_time, is_call, is_american, steps)
+        theta = (price_time - price) / h_time
+    else:
+        theta = 0
+    
+    h_rate = 0.01
+    price_rate_up = binomial_price(spot, strike, rate + h_rate, vol, maturity, is_call, is_american, steps)
+    rho = (price_rate_up - price) / h_rate
+    
+    return {
+        "price": price,
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "rho": rho
+    }
+
+def heston_price(spot: float, strike: float, rate: float, vol: float, maturity: float,
+                is_call: bool, num_sims: int, kappa: float, sigma: float, rho: float) -> float:
+    np.random.seed(42)
+    dt = maturity / 100
+    num_steps = 100
+    
+    S = np.full(num_sims, spot)
+    V = np.full(num_sims, vol ** 2)
+    
+    for _ in range(num_steps):
+        Z1 = np.random.standard_normal(num_sims)
+        Z2 = np.random.standard_normal(num_sims)
+        W1 = Z1
+        W2 = rho * Z1 + sqrt(1 - rho ** 2) * Z2
+        
+        V_new = V + kappa * (vol ** 2 - V) * dt + sigma * np.sqrt(np.maximum(V, 0)) * sqrt(dt) * W2
+        V = np.maximum(V_new, 0)
+        
+        S = S * np.exp((rate - 0.5 * V) * dt + np.sqrt(V) * sqrt(dt) * W1)
+    
+    if is_call:
+        payoff = np.maximum(S - strike, 0)
+    else:
+        payoff = np.maximum(strike - S, 0)
+    
+    price = exp(-rate * maturity) * np.mean(payoff)
+    return price
+
+def heston_greeks(spot: float, strike: float, rate: float, vol: float, maturity: float,
+                 is_call: bool, num_sims: int, kappa: float, sigma: float, rho: float) -> dict:
+    price = heston_price(spot, strike, rate, vol, maturity, is_call, num_sims, kappa, sigma, rho)
+    
+    h = spot * 0.01
+    price_up = heston_price(spot + h, strike, rate, vol, maturity, is_call, num_sims, kappa, sigma, rho)
+    price_down = heston_price(spot - h, strike, rate, vol, maturity, is_call, num_sims, kappa, sigma, rho)
+    delta = (price_up - price_down) / (2 * h)
+    
+    gamma = (price_up - 2 * price + price_down) / (h ** 2)
+    
+    h_vol = 0.01
+    price_vol_up = heston_price(spot, strike, rate, vol + h_vol, maturity, is_call, num_sims, kappa, sigma, rho)
+    vega = (price_vol_up - price) / h_vol
+    
+    h_time = 1 / 365
+    if maturity > h_time:
+        price_time = heston_price(spot, strike, rate, vol, maturity - h_time, is_call, num_sims, kappa, sigma, rho)
+        theta = (price_time - price) / h_time
+    else:
+        theta = 0
+    
+    h_rate = 0.01
+    price_rate_up = heston_price(spot, strike, rate + h_rate, vol, maturity, is_call, num_sims, kappa, sigma, rho)
+    rho_greek = (price_rate_up - price) / h_rate
+    
+    return {
+        "price": price,
+        "delta": delta,
+        "gamma": gamma,
+        "theta": theta,
+        "vega": vega,
+        "rho": rho_greek
+    }
+
+def calculate_price_and_greeks(spot, strike, rate, vol, maturity, option_type, model, is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations):
+    is_call = option_type == "call"
+    
+    if model == "black-scholes":
+        if is_american:
+            raise ValueError("Black-Scholes only supports European options. Use Binomial for American.")
+        
+        greeks = black_scholes_greeks(spot, strike, rate, vol, maturity, is_call)
+        greeks["model"] = "Black-Scholes"
+        
+    elif model == "binomial":
+        greeks = binomial_greeks(spot, strike, rate, vol, maturity, is_call, is_american, steps)
+        option_style = "American" if is_american else "European"
+        greeks["model"] = f"Binomial ({option_style}, {steps} steps)"
+        
+    elif model == "heston":
+        if is_american:
+            raise ValueError("Heston model only supports European options. Use Binomial for American.")
+        
+        greeks = heston_greeks(spot, strike, rate, vol, maturity, is_call, num_simulations, mean_reversion, vol_of_vol, correlation)
+        greeks["model"] = f"Heston ({num_simulations} simulations)"
+        
+    else:
+        raise ValueError(f"Unknown model: {model}")
+    
+    return greeks
+
+def get_payoff_diagram(spot, strike, rate, vol, maturity, option_type, model, is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations):
+    is_call = option_type == "call"
+    spot_range = np.linspace(spot * 0.5, spot * 1.5, 100)
+    
+    prices = []
+    payoffs = []
+    
+    for S in spot_range:
+        if model == "black-scholes":
+            price = black_scholes_price(S, strike, rate, vol, maturity, is_call)
+        elif model == "binomial":
+            price = binomial_price(S, strike, rate, vol, maturity, is_call, is_american, steps)
+        else:
+            price = heston_price(S, strike, rate, vol, maturity, is_call, num_simulations, mean_reversion, vol_of_vol, correlation)
+        
+        prices.append(float(price))
+        
+        if is_call:
+            payoff = max(S - strike, 0)
+        else:
+            payoff = max(strike - S, 0)
+        payoffs.append(float(payoff))
+    
+    return {
+        "spot_range": spot_range.tolist(),
+        "option_prices": prices,
+        "payoffs": payoffs,
+        "strike": strike
+    }
 
 st.set_page_config(
     page_title="Option Pricing Platform",
@@ -100,24 +340,11 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-try:
-    response = requests.get(f"{API_URL}/health", timeout=2)
-    connected = response.ok
-except:
-    connected = False
-
 col1, col2 = st.columns([6, 1])
 with col1:
     st.title("Option Pricing Platform")
 with col2:
-    if connected:
-        st.markdown("### <span style='color: #10b981;'>●</span> Live", unsafe_allow_html=True)
-    else:
-        st.markdown("### <span style='color: #ef4444;'>●</span> Offline", unsafe_allow_html=True)
-
-if not connected:
-    st.error("API server not available. Start with: python api/main.py")
-    st.stop()
+    st.markdown("### <span style='color: #10b981;'>●</span> Live", unsafe_allow_html=True)
 
 st.markdown("---")
 
@@ -164,38 +391,21 @@ with st.sidebar:
     calculate_btn = st.button("Calculate Price", type="primary")
 
 if calculate_btn:
-    payload = {
-        "spot": spot,
-        "strike": strike,
-        "maturity_years": maturity,
-        "rate": rate,
-        "vol": vol,
-        "option_type": option_type,
-        "model": model,
-        "is_american": is_american,
-        "steps": steps,
-        "mean_reversion": mean_reversion,
-        "vol_of_vol": vol_of_vol,
-        "correlation": correlation,
-        "num_simulations": num_simulations
-    }
-    
-    st.session_state["payload"] = payload
-    
-    with st.spinner("Computing..."):
-        try:
-            response = requests.post(f"{API_URL}/price", json=payload, timeout=30)
-            if response.ok:
-                result = response.json()
-                st.session_state["result"] = result
-                
-                payoff_response = requests.post(f"{API_URL}/payoff", json=payload, timeout=30)
-                if payoff_response.ok:
-                    st.session_state["payoff"] = payoff_response.json()
-            else:
-                st.error(response.text)
-        except Exception as e:
-            st.error(f"Error: {str(e)}")
+    try:
+        with st.spinner("Computing..."):
+            result = calculate_price_and_greeks(
+                spot, strike, rate, vol, maturity, option_type, model,
+                is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations
+            )
+            st.session_state["result"] = result
+            
+            payoff = get_payoff_diagram(
+                spot, strike, rate, vol, maturity, option_type, model,
+                is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations
+            )
+            st.session_state["payoff"] = payoff
+    except Exception as e:
+        st.error(f"Error: {str(e)}")
 
 if "result" in st.session_state:
     result = st.session_state["result"]
@@ -344,133 +554,124 @@ if "result" in st.session_state:
         
         st.markdown("## Greeks Sensitivity")
         
-        if "payload" in st.session_state:
-            payload = st.session_state["payload"]
+        tab1, tab2, tab3 = st.tabs(["Delta Profile", "Gamma Profile", "Theta Decay"])
+        
+        with tab1:
+            spot_range_greek = np.linspace(spot * 0.7, spot * 1.3, 50)
+            delta_values = []
             
-            tab1, tab2, tab3 = st.tabs(["Delta Profile", "Gamma Profile", "Theta Decay"])
+            for S in spot_range_greek:
+                try:
+                    temp_result = calculate_price_and_greeks(
+                        S, strike, rate, vol, maturity, option_type, model,
+                        is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations
+                    )
+                    delta_values.append(temp_result["delta"])
+                except:
+                    delta_values.append(None)
             
-            with tab1:
-                spot_range_greek = np.linspace(spot * 0.7, spot * 1.3, 50)
-                delta_values = []
-                
-                for S in spot_range_greek:
-                    temp_payload = payload.copy()
-                    temp_payload["spot"] = float(S)
-                    try:
-                        resp = requests.post(f"{API_URL}/price", json=temp_payload, timeout=10)
-                        if resp.ok:
-                            delta_values.append(resp.json()["delta"])
-                        else:
-                            delta_values.append(None)
-                    except:
-                        delta_values.append(None)
-                
-                fig_delta = go.Figure()
-                fig_delta.add_trace(go.Scatter(
-                    x=spot_range_greek,
-                    y=delta_values,
-                    line=dict(color="#667eea", width=3),
-                    fill='tozeroy',
-                    fillcolor='rgba(102, 126, 234, 0.2)'
-                ))
-                
-                fig_delta.add_vline(x=spot, line_dash="dash", line_color="#10b981", 
-                                   annotation_text="Current Spot")
-                fig_delta.add_vline(x=strike, line_dash="dot", line_color="#6b7280", 
-                                   annotation_text="Strike")
-                
-                fig_delta.update_layout(
-                    title="Delta vs Underlying Price",
-                    xaxis_title="Spot Price ($)",
-                    yaxis_title="Delta",
-                    template="plotly_dark",
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(31, 41, 55, 0.5)',
-                    height=500
-                )
-                
-                st.plotly_chart(fig_delta, use_container_width=True)
+            fig_delta = go.Figure()
+            fig_delta.add_trace(go.Scatter(
+                x=spot_range_greek,
+                y=delta_values,
+                line=dict(color="#667eea", width=3),
+                fill='tozeroy',
+                fillcolor='rgba(102, 126, 234, 0.2)'
+            ))
             
-            with tab2:
-                gamma_values = []
-                
-                for S in spot_range_greek:
-                    temp_payload = payload.copy()
-                    temp_payload["spot"] = float(S)
-                    try:
-                        resp = requests.post(f"{API_URL}/price", json=temp_payload, timeout=10)
-                        if resp.ok:
-                            gamma_values.append(resp.json()["gamma"])
-                        else:
-                            gamma_values.append(None)
-                    except:
-                        gamma_values.append(None)
-                
-                fig_gamma = go.Figure()
-                fig_gamma.add_trace(go.Scatter(
-                    x=spot_range_greek,
-                    y=gamma_values,
-                    line=dict(color="#f59e0b", width=3),
-                    fill='tozeroy',
-                    fillcolor='rgba(245, 158, 11, 0.2)'
-                ))
-                
-                fig_gamma.add_vline(x=spot, line_dash="dash", line_color="#10b981", 
-                                   annotation_text="Current Spot")
-                fig_gamma.add_vline(x=strike, line_dash="dot", line_color="#6b7280", 
-                                   annotation_text="Strike")
-                
-                fig_gamma.update_layout(
-                    title="Gamma vs Underlying Price",
-                    xaxis_title="Spot Price ($)",
-                    yaxis_title="Gamma",
-                    template="plotly_dark",
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(31, 41, 55, 0.5)',
-                    height=500
-                )
-                
-                st.plotly_chart(fig_gamma, use_container_width=True)
+            fig_delta.add_vline(x=spot, line_dash="dash", line_color="#10b981", 
+                               annotation_text="Current Spot")
+            fig_delta.add_vline(x=strike, line_dash="dot", line_color="#6b7280", 
+                               annotation_text="Strike")
             
-            with tab3:
-                time_range = np.linspace(0.01, maturity, 20)
-                theta_prices = []
+            fig_delta.update_layout(
+                title="Delta vs Underlying Price",
+                xaxis_title="Spot Price ($)",
+                yaxis_title="Delta",
+                template="plotly_dark",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(31, 41, 55, 0.5)',
+                height=500
+            )
+            
+            st.plotly_chart(fig_delta, use_container_width=True)
+        
+        with tab2:
+            gamma_values = []
+            
+            for S in spot_range_greek:
+                try:
+                    temp_result = calculate_price_and_greeks(
+                        S, strike, rate, vol, maturity, option_type, model,
+                        is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations
+                    )
+                    gamma_values.append(temp_result["gamma"])
+                except:
+                    gamma_values.append(None)
+            
+            fig_gamma = go.Figure()
+            fig_gamma.add_trace(go.Scatter(
+                x=spot_range_greek,
+                y=gamma_values,
+                line=dict(color="#f59e0b", width=3),
+                fill='tozeroy',
+                fillcolor='rgba(245, 158, 11, 0.2)'
+            ))
+            
+            fig_gamma.add_vline(x=spot, line_dash="dash", line_color="#10b981", 
+                               annotation_text="Current Spot")
+            fig_gamma.add_vline(x=strike, line_dash="dot", line_color="#6b7280", 
+                               annotation_text="Strike")
+            
+            fig_gamma.update_layout(
+                title="Gamma vs Underlying Price",
+                xaxis_title="Spot Price ($)",
+                yaxis_title="Gamma",
+                template="plotly_dark",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(31, 41, 55, 0.5)',
+                height=500
+            )
+            
+            st.plotly_chart(fig_gamma, use_container_width=True)
+        
+        with tab3:
+            time_range = np.linspace(0.01, maturity, 20)
+            theta_prices = []
+            
+            for t in time_range:
+                try:
+                    temp_result = calculate_price_and_greeks(
+                        spot, strike, rate, vol, t, option_type, model,
+                        is_american, steps, mean_reversion, vol_of_vol, correlation, num_simulations
+                    )
+                    theta_prices.append(temp_result["price"])
+                except:
+                    theta_prices.append(None)
                 
-                for t in time_range:
-                    temp_payload = payload.copy()
-                    temp_payload["maturity_years"] = float(t)
-                    try:
-                        resp = requests.post(f"{API_URL}/price", json=temp_payload, timeout=10)
-                        if resp.ok:
-                            theta_prices.append(resp.json()["price"])
-                        else:
-                            theta_prices.append(None)
-                    except:
-                        theta_prices.append(None)
-                
-                fig_theta = go.Figure()
-                fig_theta.add_trace(go.Scatter(
-                    x=time_range,
-                    y=theta_prices,
-                    line=dict(color="#ef4444", width=3),
-                    fill='tozeroy',
-                    fillcolor='rgba(239, 68, 68, 0.2)'
-                ))
-                
-                fig_theta.add_vline(x=maturity, line_dash="dash", line_color="#10b981", 
-                                   annotation_text="Current Maturity")
-                
-                fig_theta.update_layout(
-                    title="Option Price vs Time to Maturity",
-                    xaxis_title="Time to Maturity (years)",
-                    yaxis_title="Option Price ($)",
-                    template="plotly_dark",
-                    paper_bgcolor='rgba(0,0,0,0)',
-                    plot_bgcolor='rgba(31, 41, 55, 0.5)',
-                    height=500
-                )
-                
-                st.plotly_chart(fig_theta, use_container_width=True)
+            fig_theta = go.Figure()
+            fig_theta.add_trace(go.Scatter(
+                x=time_range,
+                y=theta_prices,
+                line=dict(color="#ef4444", width=3),
+                fill='tozeroy',
+                fillcolor='rgba(239, 68, 68, 0.2)'
+            ))
+            
+            fig_theta.add_vline(x=maturity, line_dash="dash", line_color="#10b981", 
+                               annotation_text="Current Maturity")
+            
+            fig_theta.update_layout(
+                title="Option Price vs Time to Maturity",
+                xaxis_title="Time to Maturity (years)",
+                yaxis_title="Option Price ($)",
+                template="plotly_dark",
+                paper_bgcolor='rgba(0,0,0,0)',
+                plot_bgcolor='rgba(31, 41, 55, 0.5)',
+                height=500
+            )
+            
+            st.plotly_chart(fig_theta, use_container_width=True)
 
 else:
     st.markdown("""
