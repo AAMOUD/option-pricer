@@ -1,7 +1,6 @@
-from math import exp, log, sqrt
+from math import exp, log, sqrt, erf, pi
 from typing import Literal
 import numpy as np
-from scipy.stats import norm
 from fastapi import FastAPI, HTTPException
 from pydantic import BaseModel, Field
 
@@ -40,44 +39,53 @@ class OptionResponse(BaseModel):
 
 def black_scholes_price(spot: float, strike: float, rate: float, vol: float, 
                        maturity: float, is_call: bool) -> float:
+    def norm_cdf(x: float) -> float:
+        return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
     d1 = (log(spot / strike) + (rate + 0.5 * vol ** 2) * maturity) / (vol * sqrt(maturity))
     d2 = d1 - vol * sqrt(maturity)
     
     if is_call:
-        price = spot * norm.cdf(d1) - strike * exp(-rate * maturity) * norm.cdf(d2)
+        price = spot * norm_cdf(d1) - strike * exp(-rate * maturity) * norm_cdf(d2)
     else:
-        price = strike * exp(-rate * maturity) * norm.cdf(-d2) - spot * norm.cdf(-d1)
+        price = strike * exp(-rate * maturity) * norm_cdf(-d2) - spot * norm_cdf(-d1)
     
     return price
 
 
 def black_scholes_greeks(spot: float, strike: float, rate: float, vol: float,
                         maturity: float, is_call: bool) -> dict:
+    def norm_pdf(x: float) -> float:
+        return (1.0 / sqrt(2.0 * pi)) * exp(-0.5 * x * x)
+
+    def norm_cdf(x: float) -> float:
+        return 0.5 * (1.0 + erf(x / sqrt(2.0)))
+
     d1 = (log(spot / strike) + (rate + 0.5 * vol ** 2) * maturity) / (vol * sqrt(maturity))
     d2 = d1 - vol * sqrt(maturity)
     
     price = black_scholes_price(spot, strike, rate, vol, maturity, is_call)
     
     if is_call:
-        delta = norm.cdf(d1)
+        delta = norm_cdf(d1)
     else:
-        delta = norm.cdf(d1) - 1
+        delta = norm_cdf(d1) - 1
     
-    gamma = norm.pdf(d1) / (spot * vol * sqrt(maturity))
+    gamma = norm_pdf(d1) / (spot * vol * sqrt(maturity))
     
-    theta_common = -(spot * norm.pdf(d1) * vol) / (2 * sqrt(maturity))
+    theta_common = -(spot * norm_pdf(d1) * vol) / (2 * sqrt(maturity))
     if is_call:
-        theta = theta_common - rate * strike * exp(-rate * maturity) * norm.cdf(d2)
+        theta = theta_common - rate * strike * exp(-rate * maturity) * norm_cdf(d2)
     else:
-        theta = theta_common + rate * strike * exp(-rate * maturity) * norm.cdf(-d2)
+        theta = theta_common + rate * strike * exp(-rate * maturity) * norm_cdf(-d2)
     theta = theta / 365
     
-    vega = spot * norm.pdf(d1) * sqrt(maturity)
+    vega = spot * norm_pdf(d1) * sqrt(maturity)
     
     if is_call:
-        rho = strike * maturity * exp(-rate * maturity) * norm.cdf(d2)
+        rho = strike * maturity * exp(-rate * maturity) * norm_cdf(d2)
     else:
-        rho = -strike * maturity * exp(-rate * maturity) * norm.cdf(-d2)
+        rho = -strike * maturity * exp(-rate * maturity) * norm_cdf(-d2)
     
     return {
         "price": price,
