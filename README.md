@@ -1,5 +1,7 @@
 # Option Pricing Platform
 
+**Live App**: [https://option-pricing-simulator.streamlit.app/](https://option-pricing-simulator.streamlit.app/)
+
 Option pricing with Black-Scholes, Binomial, and Heston models.
 
 ## Features
