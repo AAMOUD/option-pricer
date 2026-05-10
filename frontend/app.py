@@ -44,7 +44,7 @@ def black_scholes_greeks(spot: float, strike: float, rate: float, vol: float,
         theta = theta_common + rate * strike * exp(-rate * maturity) * norm_cdf(-d2)
     theta = theta / 365
     
-    vega = spot * norm_pdf(d1) * sqrt(maturity)
+    vega = spot * norm_pdf(d1) * sqrt(maturity) / 100
     
     if is_call:
         rho = strike * maturity * exp(-rate * maturity) * norm_cdf(d2)
@@ -104,7 +104,8 @@ def binomial_greeks(spot: float, strike: float, rate: float, vol: float,
     
     h_vol = 0.01
     price_vol_up = binomial_price(spot, strike, rate, vol + h_vol, maturity, is_call, is_american, steps)
-    vega = (price_vol_up - price) / h_vol
+    price_vol_down = binomial_price(spot, strike, rate, vol - h_vol, maturity, is_call, is_american, steps)
+    vega = (price_vol_up - price_vol_down) / (2 * h_vol) / 100
     
     h_time = 1 / 365
     if maturity > h_time:
@@ -167,7 +168,8 @@ def heston_greeks(spot: float, strike: float, rate: float, vol: float, maturity:
     
     h_vol = 0.01
     price_vol_up = heston_price(spot, strike, rate, vol + h_vol, maturity, is_call, num_sims, kappa, sigma, rho)
-    vega = (price_vol_up - price) / h_vol
+    price_vol_down = heston_price(spot, strike, rate, vol - h_vol, maturity, is_call, num_sims, kappa, sigma, rho)
+    vega = (price_vol_up - price_vol_down) / (2 * h_vol) / 100
     
     h_time = 1 / 365
     if maturity > h_time:
@@ -554,7 +556,7 @@ if "result" in st.session_state:
         
         st.markdown("## Greeks Sensitivity")
         
-        tab1, tab2, tab3 = st.tabs(["Delta Profile", "Gamma Profile", "Theta Decay"])
+        tab1, tab2, tab3 = st.tabs(["Delta Profile", "Gamma Profile", "Time Value vs Maturity"])
         
         with tab1:
             spot_range_greek = np.linspace(spot * 0.7, spot * 1.3, 50)
