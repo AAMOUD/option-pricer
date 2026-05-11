@@ -3,6 +3,13 @@ import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 import numpy as np
 from math import exp, log, sqrt, erf, pi
+import sys, os
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..', 'build'))
+try:
+    import pricer_cpp
+    _USE_CPP = True
+except ImportError:
+    _USE_CPP = False
 
 # Pricing functions
 def norm_pdf(x: float) -> float:
@@ -62,6 +69,9 @@ def black_scholes_greeks(spot: float, strike: float, rate: float, vol: float,
 
 def binomial_price(spot: float, strike: float, rate: float, vol: float,
                   maturity: float, is_call: bool, is_american: bool, steps: int) -> float:
+    if _USE_CPP:
+        return pricer_cpp.binomial_price(spot, strike, rate, vol, maturity,
+                                         is_call, is_american, steps)
     dt = maturity / steps
     u = exp(vol * sqrt(dt))
     d = 1 / u
@@ -129,6 +139,9 @@ def binomial_greeks(spot: float, strike: float, rate: float, vol: float,
 
 def heston_price(spot: float, strike: float, rate: float, vol: float, maturity: float,
                 is_call: bool, num_sims: int, kappa: float, sigma: float, rho: float) -> float:
+    if _USE_CPP:
+        return pricer_cpp.heston_price(spot, strike, rate, vol, maturity,
+                                        is_call, num_sims, kappa, sigma, rho)
     np.random.seed(42)
     dt = maturity / 100
     num_steps = 100
